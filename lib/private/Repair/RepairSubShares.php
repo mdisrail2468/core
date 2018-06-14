@@ -55,48 +55,64 @@ class RepairSubShares implements IRepairStep {
 	private function setRemoveAndSelectQuery() {
 		/**
 		 * Retrieves the duplicate rows with different id's
-		 * of oc_share
+		 * of oc_share. The query would look like:
+		 * SELECT id
+		 * FROM oc_share
+		 * WHERE id NOT IN (
+		 * 		SELECT MIN(id)
+		 * 		FROM oc_share
+		 * 		GROUP BY share_with, parent
+		 * )
+		 * AND share_type=2;
 		 */
 		$builder = $this->connection->getQueryBuilder();
-		$builder
-			->select('id', 'parent', $builder->createFunction('count(*)'))
+		$subQuery = $this->connection->getQueryBuilder();
+		$subQuery
+			->select($subQuery->createFunction('MIN(`id`)'))
 			->from('share')
-			->where($builder->expr()->eq('share_type', $builder->createNamedParameter(2)))
-			->groupBy('parent')
-			->addGroupBy('id')
-			->addGroupBy('share_with')
-			->having('count(*) > 1')->setMaxResults(1000);
+			->groupBy('share_with')
+			->addGroupBy('parent');
+
+		$builder->select('id')
+			->from('share')
+			->where($builder->expr()->notIn('id', $builder->createFunction($subQuery->getSQL())))
+			->andWhere($builder->expr()->eq('share_type', $builder->createNamedParameter(2)));
 
 		$this->getDuplicateRows = $builder;
 
 		$builder = $this->connection->getQueryBuilder();
 		$builder
 			->delete('share')
-			->where($builder->expr()->eq('id', $builder->createParameter('shareId')));
+			->where($builder->expr()->in('id', $builder->createParameter('shareIds')));
 
 		$this->deleteShareId = $builder;
+	}
+
+	public function getDuplicateRowQueryBuilder() {
+		return $this->getDuplicateRows;
 	}
 
 	public function run(IOutput $output) {
 		$deletedEntries = 0;
 		$this->setRemoveAndSelectQuery();
 
-		/**
-		 * Going for pagination because if there are 1 million rows
-		 * it wont be easy to scale the data
-		 */
-		do {
-			$results = $this->getDuplicateRows->execute();
-			$rows = $results->fetchAll();
+		$results = $this->getDuplicateRows->execute();
+		$rows = $results->fetchAll();
+		$rowId = [];
+		if (\count($rows) > 0) {
 			$results->closeCursor();
-			$lastResultCount = 0;
-
-			foreach ($rows as $row) {
-				$deletedEntries += $this->deleteShareId->setParameter('shareId', (int) $row['id'])
-					->execute();
-				$lastResultCount++;
-			}
-		} while ($lastResultCount > 0);
+			$rowId = \array_map(
+				function ($value) {
+					return (int)$value['id'];
+				},
+				$rows
+			);
+		}
+		//Delete in a batch of 1000 ids
+		foreach (\array_chunk($rowId, 1000) as $getIds) {
+			$deletedEntries += $this->deleteShareId->setParameter('shareIds', $getIds, IQueryBuilder::PARAM_INT_ARRAY)
+				->execute();
+		}
 
 		if ($deletedEntries > 0) {
 			$output->info('Removed ' . $deletedEntries . ' shares where duplicate rows where found');
