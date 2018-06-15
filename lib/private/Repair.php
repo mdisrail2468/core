@@ -127,12 +127,7 @@ class Repair implements IOutput {
 	 * @return IRepairStep[]
 	 */
 	public static function getRepairSteps() {
-		return [
-			new RepairMimeTypes(\OC::$server->getConfig()),
-			new RepairMismatchFileCachePath(
-				\OC::$server->getDatabaseConnection(),
-				\OC::$server->getMimeTypeLoader(),
-				\OC::$server->getLogger()),
+		$repairSteps = [
 			new FillETags(\OC::$server->getDatabaseConnection()),
 			new CleanTags(\OC::$server->getDatabaseConnection(), \OC::$server->getUserManager()),
 			new DropOldTables(\OC::$server->getDatabaseConnection()),
@@ -166,6 +161,19 @@ class Repair implements IOutput {
 				\OC::$server->getDatabaseConnection()
 			),
 		];
+
+		$currentVersion = \OC::$server->getConfig()->getSystemValue('version', '0.0.0');
+
+		//Execute repair step if version is greater than 10.0.4
+		if (\version_compare($currentVersion, '10.0.4', '<')) {
+			\array_unshift($repairSteps, new RepairMismatchFileCachePath(
+				\OC::$server->getDatabaseConnection(),
+				\OC::$server->getMimeTypeLoader(),
+				\OC::$server->getLogger()));
+		}
+		\array_unshift($repairSteps, new RepairMimeTypes(\OC::$server->getConfig()));
+
+		return $repairSteps;
 	}
 
 	/**
